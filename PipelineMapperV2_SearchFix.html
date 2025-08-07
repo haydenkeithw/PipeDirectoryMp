@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+
+<html>
+<head>
+<title>PipeDirectoryMp</title>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link href="https://unpkg.com/leaflet/dist/leaflet.css" rel="stylesheet"/>
+<link href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" rel="stylesheet"/>
+<style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; }
+    .toolbar {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: white;
+      padding: 10px;
+      border-radius: 5px;
+      z-index: 1001;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .toolbar button {
+      cursor: pointer;
+      padding: 5px 10px;
+    }
+    .form-popup {
+      position: fixed;
+      bottom: 20px;
+      left: 20px;
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.3);
+      z-index: 1000;
+      display: none;
+    }
+    .context-menu {
+      position: absolute;
+      background: white;
+      border: 1px solid #ccc;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+      z-index: 2000;
+      display: none;
+    }
+    .context-menu button {
+      display: block;
+      width: 100%;
+      padding: 8px 10px;
+      border: none;
+      background: white;
+      cursor: pointer;
+    }
+    .context-menu button:hover {
+      background: #eee;
+    }
+    input, select, textarea { width: 100%; margin: 5px 0; padding: 5px; }
+    .leaflet-marker-icon.remove-icon {
+      background: red;
+      border-radius: 50%;
+      width: 10px;
+      height: 10px;
+    }
+  </style>
+</head>
+<body>
+<div class="toolbar">
+<button id="panTool">🖐️ Pan</button>
+<button id="pinTool">➕ Add Pin</button>
+<input id="searchBox" placeholder="Search location..." type="text"/>
+<button id="searchButton">🔍</button>
+</div>
+<div id="map"></div>
+<div class="form-popup" id="formPopup">
+<h4>Pipe Segment Info</h4>
+<form id="pipeForm">
+<input id="footage" placeholder="Footage (ft)" type="text"/>
+<input id="pipeSize" placeholder="Pipe Size" type="text"/>
+<input id="lotNumber" placeholder="Lot Number" type="text"/>
+<select id="method">
+<option value="Trench">Trench</option>
+<option value="Bore">Bore</option>
+</select>
+<input id="wireSize" placeholder="Tracer Wire Size" type="text"/>
+<textarea id="notes" placeholder="Notes"></textarea>
+<input accept="image/*,video/*" id="media" multiple="" type="file"/>
+<button type="submit">Save Entry</button>
+<button onclick="document.getElementById('formPopup').style.display='none'" type="button">Close</button>
+</form>
+</div>
+<div class="context-menu" id="contextMenu">
+<button id="editPin">📝 Edit Pin</button>
+<button id="deletePin">❌ Delete Pin</button>
+</div>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+<script>
+    const map = L.map('map').setView([30.4, -89.0], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 20 }).addTo(map);
+
+    const geocoder = L.Control.Geocoder.nominatim();
+L.Control.geocoder({ defaultMarkGeocode: false })
+  .on('markgeocode', function(e) {
+    const bbox = e.geocode.bbox;
+    const poly = L.polygon([
+      [bbox.getSouthEast().lat, bbox.getSouthEast().lng],
+      [bbox.getNorthEast().lat, bbox.getNorthEast().lng],
+      [bbox.getNorthWest().lat, bbox.getNorthWest().lng],
+      [bbox.getSouthWest().lat, bbox.getSouthWest().lng]
+    ]).addTo(map);
+    map.fitBounds(poly.getBounds());
+  })
+  .addTo(map);
+
+    document.getElementById('searchButton').addEventListener('click', function() {
+      const query = document.getElementById('searchBox').value;
+      geocoder.geocode(query, function(results) {
+        if (results.length > 0) {
+          const r = results[0];
+          map.setView(r.center, 16);
+          L.marker(r.center).addTo(map).bindPopup(r.name).openPopup();
+        } else {
+          alert('Location not found');
+        }
+      });
+    });
+
+    let mode = 'pan';
+    let points = [], markers = [], segments = [], currentMarker = null;
+    let segmentData = {};
+
+    document.getElementById('panTool').onclick = () => mode = 'pan';
+    document.getElementById('pinTool').onclick = () => mode = 'add';
+
+    const contextMenu = document.getElementById('contextMenu');
+
+    function showContextMenu(marker, event) {
+      currentMarker = marker;
+      contextMenu.style.display = 'block';
+      contextMenu.style.left = `${event.containerPoint.x}px`;
+      contextMenu.style.top = `${event.containerPoint.y}px`;
+    }
+
+    function hideContextMenu() {
+      contextMenu.style.display = 'none';
+    }
+
+    document.getElementById('deletePin').onclick = () => {
+      if (currentMarker) {
+        const latlng = currentMarker.getLatLng();
+        map.removeLayer(currentMarker);
+        markers = markers.filter(m => m !== currentMarker);
+        points = points.filter(p => !p.equals(latlng));
+
+        segments.forEach(({ line, start, end }) => {
+          if (start.equals(latlng) || end.equals(latlng)) {
+            map.removeLayer(line);
+            delete segmentData[line._leaflet_id];
+          }
+        });
+        segments = segments.filter(({ start, end }) => !start.equals(latlng) && !end.equals(latlng));
+
+        saveState();
+        hideContextMenu();
+      }
+    };
+
+    document.getElementById('editPin').onclick = () => {
+      if (currentMarker) {
+        currentMarker.dragging.enable();
+        alert("Pin is now editable. Drag it to a new location.");
+        const originalLatLng = currentMarker.getLatLng();
+        currentMarker.on('dragend', function(e) {
+          const newLatLng = currentMarker.getLatLng();
+
+          segments.forEach(({ line, start, end }) => {
+            if (start.equals(originalLatLng)) {
+              line.setLatLngs([newLatLng, end]);
+              start.lat = newLatLng.lat;
+              start.lng = newLatLng.lng;
+            }
+            if (end.equals(originalLatLng)) {
+              line.setLatLngs([start, newLatLng]);
+              end.lat = newLatLng.lat;
+              end.lng = newLatLng.lng;
+            }
+          });
+          saveState();
+        });
+        hideContextMenu();
+      }
+    };
+
+    map.on('click', function() { hideContextMenu(); });
+
+    function createMarker(latlng) {
+      const marker = L.marker(latlng, { draggable: true }).addTo(map);
+      marker.on('contextmenu', function(e) {
+        showContextMenu(marker, e);
+      });
+      markers.push(marker);
+      points.push(latlng);
+
+      if (points.length === 2) {
+        const line = L.polyline(points, { color: 'yellow' }).addTo(map);
+        const start = points[0];
+        const end = points[1];
+        segments.push({ line, start, end });
+        segmentData[line._leaflet_id] = {}; // Initialize empty segment data
+        line.on('click', function() {
+          openForm(line);
+        });
+        points = [];
+      }
+      saveState();
+    }
+
+    map.on('click', function(e) {
+      if (mode === 'add') {
+        createMarker(e.latlng);
+      }
+    });
+
+    function openForm(line) {
+      const formPopup = document.getElementById("formPopup");
+      formPopup.style.display = 'block';
+
+      const data = segmentData[line._leaflet_id] || {};
+      document.getElementById("footage").value = data.footage || "";
+      document.getElementById("pipeSize").value = data.pipeSize || "";
+      document.getElementById("lotNumber").value = data.lotNumber || "";
+      document.getElementById("method").value = data.method || "Trench";
+      document.getElementById("wireSize").value = data.wireSize || "";
+      document.getElementById("notes").value = data.notes || "";
+
+      document.getElementById("pipeForm").onsubmit = function(e) {
+        e.preventDefault();
+        segmentData[line._leaflet_id] = {
+          footage: document.getElementById("footage").value,
+          pipeSize: document.getElementById("pipeSize").value,
+          lotNumber: document.getElementById("lotNumber").value,
+          method: document.getElementById("method").value,
+          wireSize: document.getElementById("wireSize").value,
+          notes: document.getElementById("notes").value
+        };
+        alert("Segment saved.");
+        formPopup.style.display = 'none';
+        document.getElementById("pipeForm").reset();
+        saveState();
+      };
+    }
+
+    function saveState() {
+      const savedMarkers = markers.map(m => m.getLatLng());
+      const savedSegments = segments.map(s => ({ start: s.start, end: s.end, id: s.line._leaflet_id }));
+      localStorage.setItem('markers', JSON.stringify(savedMarkers));
+      localStorage.setItem('segments', JSON.stringify(savedSegments));
+      localStorage.setItem('segmentData', JSON.stringify(segmentData));
+    }
+
+    function loadState() {
+      const savedMarkers = JSON.parse(localStorage.getItem('markers') || '[]');
+      const savedSegments = JSON.parse(localStorage.getItem('segments') || '[]');
+      segmentData = JSON.parse(localStorage.getItem('segmentData') || '{}');
+
+      savedMarkers.forEach(latlng => createMarker(L.latLng(latlng)));
+      savedSegments.forEach(seg => {
+        const line = L.polyline([seg.start, seg.end], { color: 'yellow' }).addTo(map);
+        segments.push({ line, start: seg.start, end: seg.end });
+        line.on('click', function() {
+          openForm(line);
+        });
+      });
+    }
+
+    loadState();
+  </script>
+</body>
+</html>
